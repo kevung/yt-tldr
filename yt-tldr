@@ -4,7 +4,9 @@
 import sys
 import re
 import subprocess
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+import tempfile
+import os
+import glob
 
 
 def extract_video_id(url: str) -> str:
@@ -22,17 +24,64 @@ def extract_video_id(url: str) -> str:
     raise ValueError(f"Could not extract video ID from: {url}")
 
 
-def fetch_transcript(video_id: str) -> str:
-    api = YouTubeTranscriptApi()
-    try:
-        fetched = api.fetch(video_id)
-    except NoTranscriptFound:
-        # Try any available language
-        transcript_list = api.list(video_id)
-        transcript = next(iter(transcript_list))
-        fetched = transcript.fetch()
-    text_parts = [snippet.text for snippet in fetched.snippets]
-    return " ".join(text_parts)
+def parse_vtt(vtt_text: str) -> str:
+    """Extract plain text from a WebVTT subtitle file, deduplicating overlapping lines."""
+    lines = vtt_text.splitlines()
+    seen = []
+    for line in lines:
+        # Skip header, timing lines, and empty lines
+        if (not line.strip()
+                or line.startswith("WEBVTT")
+                or line.startswith("Kind:")
+                or line.startswith("Language:")
+                or re.match(r"\d{2}:\d{2}:\d{2}\.\d{3} -->", line)):
+            continue
+        # Strip inline word-level timestamps: <00:00:01.230> and <c>, </c>
+        line = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", line)
+        line = re.sub(r"</?c>", "", line)
+        line = line.strip()
+        if not line:
+            continue
+        # Skip sound descriptions like [Music], [Applause], etc.
+        if re.fullmatch(r"\[.*?\]", line):
+            continue
+        # Deduplicate: YouTube VTT repeats the growing line on each word
+        if not seen or seen[-1] != line:
+            seen.append(line)
+    return " ".join(seen)
+
+
+def fetch_transcript(url: str) -> str:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_template = os.path.join(tmpdir, "sub")
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--write-auto-subs",
+                "--skip-download",
+                "--sub-langs", "en.*",
+                "--sub-format", "vtt",
+                "--no-warnings",
+                "-o", output_template,
+                url,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        vtt_files = glob.glob(os.path.join(tmpdir, "*.vtt"))
+        if not vtt_files:
+            # Re-raise yt-dlp's stderr as an error message
+            raise RuntimeError(
+                result.stderr.strip()
+                or "yt-dlp did not produce any subtitle files. "
+                   "The video may not have captions."
+            )
+        # Prefer non-auto-generated if both exist; otherwise take any
+        preferred = [f for f in vtt_files if ".en." in os.path.basename(f)
+                     and ".en-orig." not in os.path.basename(f)]
+        vtt_path = preferred[0] if preferred else vtt_files[0]
+        with open(vtt_path, encoding="utf-8") as f:
+            return parse_vtt(f.read())
 
 
 def summarize(transcript: str) -> str:
@@ -63,19 +112,21 @@ def main():
         sys.exit(0 if sys.argv[1:] and sys.argv[1] in ("-h", "--help") else 1)
 
     url = sys.argv[1]
+    # Validate it looks like a YouTube URL or video ID
     try:
-        video_id = extract_video_id(url)
+        extract_video_id(url)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
     try:
-        transcript = fetch_transcript(video_id)
-    except TranscriptsDisabled:
-        print("Error: Transcripts are disabled for this video.", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
+        transcript = fetch_transcript(url)
+    except RuntimeError as e:
         print(f"Error fetching transcript: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not transcript.strip():
+        print("Error: transcript is empty.", file=sys.stderr)
         sys.exit(1)
 
     summary = summarize(transcript)

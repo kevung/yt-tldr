@@ -5,13 +5,17 @@ A CLI tool that fetches the transcript of a YouTube video and returns a concise 
 ## Requirements
 
 - Python 3
-- [`youtube-transcript-api`](https://github.com/jdepoix/youtube-transcript-api) Python package
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) (used to download captions; handles YouTube's anti-bot measures)
 - [Claude Code CLI](https://github.com/anthropics/claude-code) (`claude`) installed and authenticated
 
-Install the Python dependency:
+Install `yt-dlp` if needed:
 
 ```bash
-pip install youtube-transcript-api
+# Arch Linux
+pacman -S yt-dlp
+
+# Or via pip
+pip install yt-dlp
 ```
 
 ## Usage
@@ -31,6 +35,7 @@ The summary is printed to standard output in Markdown format.
 
 ## How it works
 
-1. Extracts the video ID from the provided URL.
-2. Fetches the auto-generated or manual transcript using `youtube-transcript-api`.
-3. Pipes the transcript to `claude --model claude-haiku-4-5-20251001 --print` and prints the response.
+1. Validates the URL and extracts the video ID.
+2. Uses `yt-dlp` to download the English auto-generated WebVTT captions into a temp directory.
+3. Parses and deduplicates the VTT into a clean transcript.
+4. Pipes the transcript to `claude --model claude-haiku-4-5-20251001 --print` and prints the response.
