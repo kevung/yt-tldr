@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""yt-tldr: Summarize a YouTube video transcript using Claude Haiku via claude CLI."""
+
+import sys
+import re
+import subprocess
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+
+
+def extract_video_id(url: str) -> str:
+    patterns = [
+        r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})",
+        r"(?:embed/|shorts/)([A-Za-z0-9_-]{11})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, url)
+        if m:
+            return m.group(1)
+    # Treat the input as a bare video ID if it looks like one
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", url):
+        return url
+    raise ValueError(f"Could not extract video ID from: {url}")
+
+
+def fetch_transcript(video_id: str) -> str:
+    api = YouTubeTranscriptApi()
+    try:
+        fetched = api.fetch(video_id)
+    except NoTranscriptFound:
+        # Try any available language
+        transcript_list = api.list(video_id)
+        transcript = next(iter(transcript_list))
+        fetched = transcript.fetch()
+    text_parts = [snippet.text for snippet in fetched.snippets]
+    return " ".join(text_parts)
+
+
+def summarize(transcript: str) -> str:
+    prompt = (
+        "Please provide a concise summary of the following YouTube video transcript. "
+        "Highlight the key points and main takeaways.\n\n"
+        f"TRANSCRIPT:\n{transcript}"
+    )
+    result = subprocess.run(
+        [
+            "claude",
+            "--model", "claude-haiku-4-5-20251001",
+            "--print",
+            prompt,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(result.stderr, file=sys.stderr)
+        sys.exit(result.returncode)
+    return result.stdout.strip()
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
+        print("Usage: yt-tldr <youtube-url>", file=sys.stderr)
+        sys.exit(0 if sys.argv[1:] and sys.argv[1] in ("-h", "--help") else 1)
+
+    url = sys.argv[1]
+    try:
+        video_id = extract_video_id(url)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        transcript = fetch_transcript(video_id)
+    except TranscriptsDisabled:
+        print("Error: Transcripts are disabled for this video.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error fetching transcript: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    summary = summarize(transcript)
+    print(summary)
+
+
+if __name__ == "__main__":
+    main()
